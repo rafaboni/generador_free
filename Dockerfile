@@ -3,7 +3,41 @@
 # Disk is ephemeral: everything below is just "install and be ready to run".
 # No model weights are baked in or auto-downloaded — pick what you need each
 # session from Settings -> Local Models (sd.cpp) or Wan2GP's own UI on :7860.
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+#
+# Multi-stage: sd.cpp needs nvcc (CUDA "devel" image) to compile with GPU
+# support. Everything else (Wan2GP, Open Generative AI) is plain Python/Node
+# with prebuilt PyTorch wheels — no compiler needed — so the final image ships
+# on the much lighter CUDA "runtime" base (same pattern as comfy-cuda).
+
+# ─── Stage 1: compile sd.cpp with CUDA ────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS sdcpp-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git build-essential cmake ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Target archs: Ampere (A100/A6000/3090, sm_80/86) and Ada (4090/L40, sm_89) —
+# the GPUs actually rented on RunPod for this. Fewer archs = much faster nvcc
+# build (was 6 archs spanning V100-H100, ~1-2h; now 3, ~15-20min).
+ARG CACHE_DATE=1
+ARG SD_CUDA_ARCHITECTURES="80;86;89"
+WORKDIR /opt
+RUN echo "cache-bust: ${CACHE_DATE}" > /dev/null && \
+    git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git && \
+    cmake -S stable-diffusion.cpp -B stable-diffusion.cpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSD_CUDA=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="${SD_CUDA_ARCHITECTURES}" && \
+    cmake --build stable-diffusion.cpp/build --config Release -j"$(nproc)"
+
+RUN mkdir -p /opt/sd-cpp/bin && \
+    cp /opt/stable-diffusion.cpp/build/bin/sd-cli /opt/sd-cpp/bin/ && \
+    find /opt/stable-diffusion.cpp/build -name "*.so*" -exec cp {} /opt/sd-cpp/bin/ \; ; \
+    chmod +x /opt/sd-cpp/bin/*
+
+# ─── Stage 2: runtime image ────────────────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -14,11 +48,10 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN sed -i 's|http://archive.ubuntu.com|https://us.archive.ubuntu.com|g' /etc/apt/sources.list && \
     echo "Acquire::Retries 5;" > /etc/apt/apt.conf.d/80retry
 
-# --- System deps ---
+# --- System deps (no compiler toolchain needed here) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates gnupg curl wget \
     git git-lfs \
-    build-essential cmake ninja-build unzip \
     python3 python3-pip python3-dev \
     ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
     openssh-server \
@@ -42,57 +75,28 @@ RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh |
 # --- JupyterLab ---
 RUN pip install jupyterlab
 
-# ─────────────────────────────────────────────────────────────────────────────
-# sd.cpp — built from source with CUDA (the prebuilt GitHub release binary is
-# CPU-only on Linux x86_64). Target archs: Ampere (A100/A6000/3090, sm_80/86)
-# and Ada (4090/L40, sm_89) — the GPUs actually rented on RunPod for this.
-# Fewer archs = much faster nvcc build (was 6 archs, ~1-2h; now 3, ~15-20min).
-# ─────────────────────────────────────────────────────────────────────────────
-ARG CACHE_DATE=1
-ARG SD_CUDA_ARCHITECTURES="80;86;89"
-WORKDIR /opt
-RUN echo "cache-bust: ${CACHE_DATE}" > /dev/null && \
-    git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git && \
-    cmake -S stable-diffusion.cpp -B stable-diffusion.cpp/build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DSD_CUDA=ON \
-        -DCMAKE_CUDA_ARCHITECTURES="${SD_CUDA_ARCHITECTURES}" && \
-    cmake --build stable-diffusion.cpp/build --config Release -j"$(nproc)"
-
-RUN mkdir -p /opt/sd-cpp/bin && \
-    cp /opt/stable-diffusion.cpp/build/bin/sd-cli /opt/sd-cpp/bin/ && \
-    find /opt/stable-diffusion.cpp/build -name "*.so*" -exec cp {} /opt/sd-cpp/bin/ \; ; \
-    chmod +x /opt/sd-cpp/bin/*
+# --- sd.cpp (compiled with CUDA in stage 1) ---
+COPY --from=sdcpp-builder /opt/sd-cpp /opt/sd-cpp
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Wan2GP — video / large-image engine, served as its own Gradio app on :7860.
-# Steps mirror Wan2GP's own official Dockerfile (CUDA wheels + SageAttention
-# compiled for the same arch list as sd.cpp above).
+# No SageAttention: it's an optional ~2x speed optimization for attention, not
+# a requirement — without it Wan2GP just uses PyTorch's built-in `sdpa`
+# (scaled_dot_product_attention), which ships prebuilt in the torch wheel and
+# needs no compilation. Dropping it removes the second CUDA source-compile
+# (and the OOM risk that came with it on a 2-core/7GB CI runner).
 # ─────────────────────────────────────────────────────────────────────────────
+ARG CACHE_DATE=1
 RUN echo "cache-bust: ${CACHE_DATE}" > /dev/null && \
     git clone --depth 1 https://github.com/deepbeepmeep/Wan2GP.git /opt/wan2gp
 
 WORKDIR /opt/wan2gp
 RUN pip install --upgrade pip setuptools wheel
 
-# Pin torch to what Wan2GP tests against before requirements.txt pulls generic versions.
-RUN pip install torch==2.10.0+cu128 torchvision==0.25.0+cu128 torchaudio==2.10.0+cu128 \
-    --index-url https://download.pytorch.org/whl/cu128
+# Generic cu124 wheel (prebuilt, no compilation) — matches the runtime base above.
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 RUN pip install -r requirements.txt
-
-ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"
-ENV FORCE_CUDA="1"
-# GitHub-hosted runners only have 2 cores / 7GB RAM — 8 parallel nvcc jobs
-# (Wan2GP's own default, tuned for a beefier box) OOMs the runner outright.
-ENV MAX_JOBS="2"
-COPY patch_sageattention.py /tmp/patch_sageattention.py
-RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
-    cp /tmp/patch_sageattention.py /tmp/sageattention/patch_sageattention.py && \
-    cd /tmp/sageattention && \
-    python3 patch_sageattention.py && \
-    pip install --no-build-isolation . && \
-    rm -rf /tmp/sageattention /tmp/patch_sageattention.py
 
 ENV HF_HOME=/root/.cache/huggingface
 
