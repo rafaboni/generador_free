@@ -44,11 +44,12 @@ RUN pip install jupyterlab
 
 # ─────────────────────────────────────────────────────────────────────────────
 # sd.cpp — built from source with CUDA (the prebuilt GitHub release binary is
-# CPU-only on Linux x86_64). Target archs cover the common RunPod GPU tiers:
-# V100 / T4 / A100 / 3090-A6000 / 4090-L40 / H100.
+# CPU-only on Linux x86_64). Target archs: Ampere (A100/A6000/3090, sm_80/86)
+# and Ada (4090/L40, sm_89) — the GPUs actually rented on RunPod for this.
+# Fewer archs = much faster nvcc build (was 6 archs, ~1-2h; now 3, ~15-20min).
 # ─────────────────────────────────────────────────────────────────────────────
 ARG CACHE_DATE=1
-ARG SD_CUDA_ARCHITECTURES="70;75;80;86;89;90"
+ARG SD_CUDA_ARCHITECTURES="80;86;89"
 WORKDIR /opt
 RUN echo "cache-bust: ${CACHE_DATE}" > /dev/null && \
     git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git && \
@@ -80,9 +81,11 @@ RUN pip install torch==2.10.0+cu128 torchvision==0.25.0+cu128 torchaudio==2.10.0
 
 RUN pip install -r requirements.txt
 
-ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"
 ENV FORCE_CUDA="1"
-ENV MAX_JOBS="8"
+# GitHub-hosted runners only have 2 cores / 7GB RAM — 8 parallel nvcc jobs
+# (Wan2GP's own default, tuned for a beefier box) OOMs the runner outright.
+ENV MAX_JOBS="2"
 COPY patch_sageattention.py /tmp/patch_sageattention.py
 RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
     cp /tmp/patch_sageattention.py /tmp/sageattention/patch_sageattention.py && \
