@@ -111,8 +111,15 @@ ENV HF_HOME=/root/.cache/huggingface
 # based UI (this image does not wire sd.cpp/Wan2GP into it).
 # ─────────────────────────────────────────────────────────────────────────────
 WORKDIR /app
+# packages/Open-AI-Design-Agent's pinned submodule commit is dangling upstream
+# (doesn't exist in Anil-matcha/Open-AI-Design-Agent — a bug in the parent
+# repo, not fixable from here without push access to it). Work around it by
+# swapping that one submodule for a fresh clone of its current main branch.
 RUN echo "cache-bust: ${CACHE_DATE}" > /dev/null && \
-    git clone --recursive https://github.com/Anil-matcha/Open-Generative-AI.git . && \
+    git clone https://github.com/Anil-matcha/Open-Generative-AI.git . && \
+    git submodule update --init packages/Open-Poe-AI packages/Vibe-Workflow && \
+    rm -rf packages/Open-AI-Design-Agent && \
+    git clone --depth 1 https://github.com/Anil-matcha/Open-AI-Design-Agent.git packages/Open-AI-Design-Agent && \
     npm install && \
     npm run build:packages && \
     npm run build
