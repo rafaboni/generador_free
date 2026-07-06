@@ -48,10 +48,15 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN sed -i 's|http://archive.ubuntu.com|https://us.archive.ubuntu.com|g' /etc/apt/sources.list && \
     echo "Acquire::Retries 5;" > /etc/apt/apt.conf.d/80retry
 
-# --- System deps (no compiler toolchain needed here) ---
+# --- System deps ---
+# build-essential is still needed here: several Wan2GP requirements.txt deps
+# (e.g. insightface) build a Cython/C++ extension at pip-install time and need
+# g++. This is much lighter than the full CUDA "devel" toolkit we dropped —
+# no nvcc, no cudnn-devel headers, just a plain C/C++ compiler.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates gnupg curl wget \
     git git-lfs \
+    build-essential \
     python3 python3-pip python3-dev \
     ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
     openssh-server \
