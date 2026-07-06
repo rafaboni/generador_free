@@ -99,7 +99,10 @@ WORKDIR /opt/wan2gp
 RUN pip install --upgrade pip setuptools wheel
 
 # Generic cu124 wheel (prebuilt, no compilation) — matches the runtime base above.
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Usa PyPI estándar (descargará automáticamente la versión con CUDA 12.4):
+RUN pip install torch torchvision torchaudio
 
 RUN pip install -r requirements.txt
 
