@@ -112,7 +112,7 @@ ENV HF_HOME=/root/.cache/huggingface
 # ─────────────────────────────────────────────────────────────────────────────
 WORKDIR /app
 RUN echo "cache-bust: ${CACHE_DATE}" > /dev/null && \
-    git clone --recursive --depth 1 https://github.com/Anil-matcha/Open-Generative-AI.git . && \
+    git clone --recursive https://github.com/Anil-matcha/Open-Generative-AI.git . && \
     npm install && \
     npm run build:packages && \
     npm run build
